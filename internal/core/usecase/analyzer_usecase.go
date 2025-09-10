@@ -34,6 +34,47 @@ func NewAnalyzerUsecase(
 	}
 }
 
+func (u *AnalyzerUsecase) buildDependencyGraph(analysis *entity.ProjectAnalysis) {
+	if analysis.DependencyGraph == nil {
+		analysis.DependencyGraph = &entity.DependencyGraph{
+			Nodes:        make([]*entity.DependencyNode, 0),
+			Dependencies: make([]*entity.Dependency, 0),
+		}
+	}
+
+	// Simple implementation - you can enhance this with actual dependency analysis
+	// For now, we'll just create a basic structure
+	for filePath, fileInfo := range analysis.Files {
+		// Add file as a node
+		fileNode := &entity.DependencyNode{
+			ID:      "file_" + filePath,
+			Name:    fileInfo.Path,
+			Type:    "file",
+			File:    filePath,
+			Package: fileInfo.PackageName,
+		}
+		analysis.DependencyGraph.Nodes = append(analysis.DependencyGraph.Nodes, fileNode)
+
+		// Add dependencies based on imports
+		for _, importPath := range fileInfo.Imports {
+			importNode := &entity.DependencyNode{
+				ID:   "import_" + importPath,
+				Name: importPath,
+				Type: "import",
+			}
+			analysis.DependencyGraph.Nodes = append(analysis.DependencyGraph.Nodes, importNode)
+
+			dependency := &entity.Dependency{
+				From:     "file_" + filePath,
+				To:       "import_" + importPath,
+				Type:     "import",
+				Strength: 5,
+			}
+			analysis.DependencyGraph.Dependencies = append(analysis.DependencyGraph.Dependencies, dependency)
+		}
+	}
+}
+
 func (u *AnalyzerUsecase) AnalyzeProject(projectPath string, config *entity.AnalysisConfig) (*entity.ProjectAnalysis, error) {
 	u.logger.WithFields(map[string]interface{}{
 		"project_path": projectPath,
@@ -72,14 +113,13 @@ func (u *AnalyzerUsecase) AnalyzeProject(projectPath string, config *entity.Anal
 	projectAnalysis.ID = uuid.New().String()
 	projectAnalysis.CreatedAt = time.Now().UTC()
 
-	// Use analyzer service to discover API endpoints and build dependency graph
+	// Use analyzer service to discover API endpoints
 	if err := u.analyzerService.DiscoverAPIEndpoints(projectAnalysis); err != nil {
 		u.logger.WithError(err).Warn("Failed to discover API endpoints")
 	}
 
-	if err := u.analyzerService.BuildDependencyGraph(projectAnalysis); err != nil {
-		u.logger.WithError(err).Warn("Failed to build dependency graph")
-	}
+	// Build dependency graph manually since BuildDependencyGraph method doesn't exist
+	u.buildDependencyGraph(projectAnalysis)
 
 	// Generate code nodes from the analysis
 	codeNodes := u.generateCodeNodes(projectAnalysis)

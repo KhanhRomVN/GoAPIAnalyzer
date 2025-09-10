@@ -20,404 +20,432 @@ func NewAnalyzerService() *AnalyzerService {
 	}
 }
 
-// DiscoverAPIEndpoints analyzes the project to discover API endpoints
+// RouterGroup represents a comprehensive router group analysis
+type RouterGroup struct {
+	VarName    string
+	Path       string
+	ParentVar  string
+	Parent     *RouterGroup
+	FullPath   string
+	LineNumber int
+	File       string
+	Children   []*RouterGroup
+}
+
+// RouteCall represents a route method call with context
+type RouteCall struct {
+	Method      string
+	Path        string
+	VarName     string
+	LineNumber  int
+	Handler     string
+	FullPath    string
+	File        string
+	Middlewares []string
+}
+
+// RouterContext holds the complete routing analysis
+type RouterContext struct {
+	Groups    map[string]*RouterGroup
+	Routes    []*RouteCall
+	Variables map[string]string // variable assignments
+	File      string
+}
+
+// DiscoverAPIEndpoints with enhanced path resolution
 func (s *AnalyzerService) DiscoverAPIEndpoints(analysis *entity.ProjectAnalysis) error {
-	s.logger.Info("Starting API endpoint discovery")
+	s.logger.Info("Starting enhanced API endpoint discovery")
 
 	var endpoints []*entity.APIEndpoint
 
-	// Look for Gin router patterns
-	ginEndpoints := s.discoverGinEndpoints(analysis)
-	endpoints = append(endpoints, ginEndpoints...)
+	// Analyze each file for routing patterns
+	for filePath, fileInfo := range analysis.Files {
+		if !s.isRouterFile(fileInfo.Content) {
+			continue
+		}
 
-	// Look for HTTP handler patterns
-	httpEndpoints := s.discoverHTTPEndpoints(analysis)
-	endpoints = append(endpoints, httpEndpoints...)
+		context := s.analyzeRouterContext(fileInfo.Content, filePath)
+		fileEndpoints := s.extractEndpointsFromContext(context)
+		endpoints = append(endpoints, fileEndpoints...)
+	}
 
-	// Look for Gorilla Mux patterns
-	muxEndpoints := s.discoverMuxEndpoints(analysis)
-	endpoints = append(endpoints, muxEndpoints...)
+	// Cross-file analysis for router setup patterns
+	crossFileEndpoints := s.analyzeCrossFileRouting(analysis)
+	endpoints = append(endpoints, crossFileEndpoints...)
 
 	analysis.APIEndpoints = endpoints
 
-	s.logger.WithField("endpoints_count", len(endpoints)).Info("API endpoint discovery completed")
+	s.logger.WithField("endpoints_count", len(endpoints)).Info("Enhanced API endpoint discovery completed")
 	return nil
 }
 
-// discoverGinEndpoints discovers Gin framework endpoints
-func (s *AnalyzerService) discoverGinEndpoints(analysis *entity.ProjectAnalysis) []*entity.APIEndpoint {
-	var endpoints []*entity.APIEndpoint
-
-	// Regex patterns for Gin route definitions
-	ginPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`\.GET\s*\(\s*"([^"]+)"`),
-		regexp.MustCompile(`\.POST\s*\(\s*"([^"]+)"`),
-		regexp.MustCompile(`\.PUT\s*\(\s*"([^"]+)"`),
-		regexp.MustCompile(`\.DELETE\s*\(\s*"([^"]+)"`),
-		regexp.MustCompile(`\.PATCH\s*\(\s*"([^"]+)"`),
-		regexp.MustCompile(`\.OPTIONS\s*\(\s*"([^"]+)"`),
-		regexp.MustCompile(`\.HEAD\s*\(\s*"([^"]+)"`),
-	}
-
-	for filePath, fileInfo := range analysis.Files {
-		content := fileInfo.Content
-
-		// Check if file likely contains Gin routes
-		if !strings.Contains(content, "gin") && !strings.Contains(content, "router") {
-			continue
-		}
-
-		for _, pattern := range ginPatterns {
-			matches := pattern.FindAllStringSubmatch(content, -1)
-			for _, match := range matches {
-				if len(match) > 1 {
-					method := s.extractMethodFromPattern(pattern.String())
-					path := match[1]
-
-					endpoint := &entity.APIEndpoint{
-						ID:      uuid.New().String(),
-						Method:  method,
-						Path:    path,
-						File:    filePath,
-						Package: fileInfo.PackageName,
-					}
-
-					// Try to find the handler function
-					handler := s.findHandlerInContent(content, path)
-					if handler != "" {
-						endpoint.Handler = handler
-					}
-
-					// Find middleware
-					middleware := s.findMiddlewareInContent(content, path)
-					endpoint.Middleware = middleware
-
-					endpoints = append(endpoints, endpoint)
-				}
-			}
-		}
-	}
-
-	return endpoints
-}
-
-// discoverHTTPEndpoints discovers standard HTTP handler endpoints
-func (s *AnalyzerService) discoverHTTPEndpoints(analysis *entity.ProjectAnalysis) []*entity.APIEndpoint {
-	var endpoints []*entity.APIEndpoint
-
-	// Pattern for http.HandleFunc calls
-	handleFuncPattern := regexp.MustCompile(`http\.HandleFunc\s*\(\s*"([^"]+)"\s*,\s*([^)]+)\)`)
-
-	for filePath, fileInfo := range analysis.Files {
-		content := fileInfo.Content
-
-		matches := handleFuncPattern.FindAllStringSubmatch(content, -1)
-		for _, match := range matches {
-			if len(match) > 2 {
-				endpoint := &entity.APIEndpoint{
-					ID:      uuid.New().String(),
-					Method:  "ANY", // HTTP handlers typically handle multiple methods
-					Path:    match[1],
-					Handler: match[2],
-					File:    filePath,
-					Package: fileInfo.PackageName,
-				}
-
-				endpoints = append(endpoints, endpoint)
-			}
-		}
-	}
-
-	return endpoints
-}
-
-// discoverMuxEndpoints discovers Gorilla Mux router endpoints
-func (s *AnalyzerService) discoverMuxEndpoints(analysis *entity.ProjectAnalysis) []*entity.APIEndpoint {
-	var endpoints []*entity.APIEndpoint
-
-	// Patterns for Mux route definitions
-	muxPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`\.Methods\s*\(\s*"([^"]+)"\s*\)\.Path\s*\(\s*"([^"]+)"\s*\)`),
-		regexp.MustCompile(`\.Path\s*\(\s*"([^"]+)"\s*\)\.Methods\s*\(\s*"([^"]+)"\s*\)`),
-		regexp.MustCompile(`\.HandleFunc\s*\(\s*"([^"]+)"\s*,\s*([^)]+)\)\.Methods\s*\(\s*"([^"]+)"\s*\)`),
-	}
-
-	for filePath, fileInfo := range analysis.Files {
-		content := fileInfo.Content
-
-		// Check if file likely contains Mux routes
-		if !strings.Contains(content, "mux") && !strings.Contains(content, "gorilla") {
-			continue
-		}
-
-		for _, pattern := range muxPatterns {
-			matches := pattern.FindAllStringSubmatch(content, -1)
-			for _, match := range matches {
-				if len(match) > 2 {
-					var method, path, handler string
-
-					// Different patterns have different group arrangements
-					if strings.Contains(pattern.String(), "Methods.*Path") {
-						method = match[1]
-						path = match[2]
-					} else if strings.Contains(pattern.String(), "Path.*Methods") {
-						path = match[1]
-						method = match[2]
-					} else if strings.Contains(pattern.String(), "HandleFunc") {
-						path = match[1]
-						handler = match[2]
-						if len(match) > 3 {
-							method = match[3]
-						}
-					}
-
-					endpoint := &entity.APIEndpoint{
-						ID:      uuid.New().String(),
-						Method:  method,
-						Path:    path,
-						Handler: handler,
-						File:    filePath,
-						Package: fileInfo.PackageName,
-					}
-
-					endpoints = append(endpoints, endpoint)
-				}
-			}
-		}
-	}
-
-	return endpoints
-}
-
-// BuildDependencyGraph builds a dependency graph for the project
-func (s *AnalyzerService) BuildDependencyGraph(analysis *entity.ProjectAnalysis) error {
-	s.logger.Info("Building dependency graph")
-
-	graph := &entity.DependencyGraph{
-		Nodes:        make([]*entity.DependencyNode, 0),
-		Dependencies: make([]*entity.Dependency, 0),
-	}
-
-	nodeMap := make(map[string]*entity.DependencyNode)
-
-	// Create nodes for all functions, structs, interfaces, etc.
-	for _, fileInfo := range analysis.Files {
-		// Add function nodes
-		for _, funcInfo := range fileInfo.Functions {
-			nodeID := s.generateNodeID(fileInfo.PackageName, funcInfo.Name, "function")
-			node := &entity.DependencyNode{
-				ID:      nodeID,
-				Name:    funcInfo.Name,
-				Type:    "function",
-				File:    fileInfo.Path,
-				Package: fileInfo.PackageName,
-			}
-			graph.Nodes = append(graph.Nodes, node)
-			nodeMap[nodeID] = node
-
-			// Add dependencies based on function calls
-			for _, call := range funcInfo.CallsTo {
-				targetNodeID := s.findNodeIDForCall(call.Name, nodeMap, fileInfo.PackageName)
-				if targetNodeID != "" && targetNodeID != nodeID {
-					dependency := &entity.Dependency{
-						From:     nodeID,
-						To:       targetNodeID,
-						Type:     "call",
-						Strength: 5,
-					}
-					graph.Dependencies = append(graph.Dependencies, dependency)
-				}
-			}
-		}
-
-		// Add struct nodes
-		for _, structInfo := range fileInfo.Structs {
-			nodeID := s.generateNodeID(fileInfo.PackageName, structInfo.Name, "struct")
-			node := &entity.DependencyNode{
-				ID:      nodeID,
-				Name:    structInfo.Name,
-				Type:    "struct",
-				File:    fileInfo.Path,
-				Package: fileInfo.PackageName,
-			}
-			graph.Nodes = append(graph.Nodes, node)
-			nodeMap[nodeID] = node
-		}
-
-		// Add interface nodes
-		for _, interfaceInfo := range fileInfo.Interfaces {
-			nodeID := s.generateNodeID(fileInfo.PackageName, interfaceInfo.Name, "interface")
-			node := &entity.DependencyNode{
-				ID:      nodeID,
-				Name:    interfaceInfo.Name,
-				Type:    "interface",
-				File:    fileInfo.Path,
-				Package: fileInfo.PackageName,
-			}
-			graph.Nodes = append(graph.Nodes, node)
-			nodeMap[nodeID] = node
-		}
-	}
-
-	// Add import dependencies
-	for _, fileInfo := range analysis.Files {
-		for _, importPath := range fileInfo.Imports {
-			// Create dependency for imports
-			if packageInfo, exists := analysis.Packages[importPath]; exists {
-				for _, funcInfo := range fileInfo.Functions {
-					fromNodeID := s.generateNodeID(fileInfo.PackageName, funcInfo.Name, "function")
-
-					// Find functions in the imported package
-					for importedFilePath := range analysis.Files {
-						if strings.Contains(importedFilePath, packageInfo.Path) {
-							importedFileInfo := analysis.Files[importedFilePath]
-							for _, importedFuncInfo := range importedFileInfo.Functions {
-								toNodeID := s.generateNodeID(importedFileInfo.PackageName, importedFuncInfo.Name, "function")
-
-								// Check if the function actually uses something from the imported package
-								for _, call := range funcInfo.CallsTo {
-									if strings.Contains(call.Name, importedFuncInfo.Name) {
-										dependency := &entity.Dependency{
-											From:     fromNodeID,
-											To:       toNodeID,
-											Type:     "import",
-											Strength: 3,
-										}
-										graph.Dependencies = append(graph.Dependencies, dependency)
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	analysis.DependencyGraph = graph
-
-	s.logger.WithFields(map[string]interface{}{
-		"nodes_count":        len(graph.Nodes),
-		"dependencies_count": len(graph.Dependencies),
-	}).Info("Dependency graph built successfully")
-
-	return nil
-}
-
-// Helper methods
-
-func (s *AnalyzerService) extractMethodFromPattern(pattern string) string {
-	if strings.Contains(pattern, "GET") {
-		return "GET"
-	} else if strings.Contains(pattern, "POST") {
-		return "POST"
-	} else if strings.Contains(pattern, "PUT") {
-		return "PUT"
-	} else if strings.Contains(pattern, "DELETE") {
-		return "DELETE"
-	} else if strings.Contains(pattern, "PATCH") {
-		return "PATCH"
-	} else if strings.Contains(pattern, "OPTIONS") {
-		return "OPTIONS"
-	} else if strings.Contains(pattern, "HEAD") {
-		return "HEAD"
-	}
-	return "UNKNOWN"
-}
-
-func (s *AnalyzerService) findHandlerInContent(content, path string) string {
-	// Try to find handler function near the route definition
-	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		if strings.Contains(line, path) {
-			// Look for handler in the same line
-			handlerPattern := regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)\s*\(`)
-			matches := handlerPattern.FindAllStringSubmatch(line, -1)
-			if len(matches) > 0 && len(matches[0]) > 1 {
-				return matches[0][1]
-			}
-
-			// Look in adjacent lines
-			for j := max(0, i-2); j < min(len(lines), i+3); j++ {
-				if j != i {
-					handlerMatches := handlerPattern.FindAllStringSubmatch(lines[j], -1)
-					if len(handlerMatches) > 0 && len(handlerMatches[0]) > 1 {
-						return handlerMatches[0][1]
-					}
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func (s *AnalyzerService) findMiddlewareInContent(content, path string) []string {
-	var middleware []string
-
-	// Look for common middleware patterns
-	middlewarePatterns := []string{
-		"middleware",
-		"auth",
-		"cors",
-		"logger",
-		"recovery",
+// analyzeRouterContext performs comprehensive analysis of a router file
+func (s *AnalyzerService) analyzeRouterContext(content, filePath string) *RouterContext {
+	ctx := &RouterContext{
+		Groups:    make(map[string]*RouterGroup),
+		Routes:    make([]*RouteCall, 0),
+		Variables: make(map[string]string),
+		File:      filePath,
 	}
 
 	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		if strings.Contains(line, path) {
-			// Look for middleware in surrounding lines
-			for j := max(0, i-5); j < min(len(lines), i+1); j++ {
-				for _, pattern := range middlewarePatterns {
-					if strings.Contains(strings.ToLower(lines[j]), pattern) {
-						middleware = append(middleware, pattern)
+
+	// Pass 1: Find variable assignments and router creations
+	s.analyzeVariableAssignments(lines, ctx)
+
+	// Pass 2: Find router groups with hierarchy
+	s.analyzeRouterGroups(lines, ctx)
+
+	// Pass 3: Find route method calls
+	s.analyzeRouteCalls(lines, ctx)
+
+	// Pass 4: Resolve full paths
+	s.resolveFullPaths(ctx)
+
+	return ctx
+}
+
+// analyzeVariableAssignments finds variable assignments like r := gin.New()
+func (s *AnalyzerService) analyzeVariableAssignments(lines []string, ctx *RouterContext) {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(\w+)\s*:=\s*gin\.New\(\)`),
+		regexp.MustCompile(`(\w+)\s*:=\s*gin\.Default\(\)`),
+		regexp.MustCompile(`(\w+)\s*:=\s*[\w\.]+\.Engine`),
+		regexp.MustCompile(`(\w+)\s*:=\s*[\w\.]+\.Group\s*\(\s*["']([^"']+)["']\s*\)`),
+	}
+
+	for _, line := range lines { // Đã xóa lineNum không sử dụng
+		for _, pattern := range patterns {
+			if matches := pattern.FindStringSubmatch(line); matches != nil {
+				if len(matches) >= 2 {
+					varName := matches[1]
+					if len(matches) >= 3 {
+						// This is a group assignment
+						ctx.Variables[varName] = matches[2]
+					} else {
+						// This is an engine assignment
+						ctx.Variables[varName] = "/"
 					}
 				}
 			}
 		}
 	}
-
-	return middleware
 }
 
-func (s *AnalyzerService) generateNodeID(packageName, name, nodeType string) string {
-	return packageName + "." + name + "." + nodeType
+// analyzeRouterGroups finds router group definitions with full hierarchy
+func (s *AnalyzerService) analyzeRouterGroups(lines []string, ctx *RouterContext) {
+	// Pattern for various group assignment styles
+	patterns := []*regexp.Regexp{
+		// api := r.Group("/v1")
+		regexp.MustCompile(`(\w+)\s*:=\s*(\w+)\.Group\s*\(\s*["']([^"']+)["']\s*\)`),
+		// user := api.Group("/user").Use(middleware)
+		regexp.MustCompile(`(\w+)\s*:=\s*(\w+)\.Group\s*\(\s*["']([^"']+)["']\s*\)\.Use\(`),
+	}
+
+	for lineNum, line := range lines {
+		for _, pattern := range patterns {
+			matches := pattern.FindStringSubmatch(line)
+			if len(matches) >= 4 {
+				varName := matches[1]
+				parentVar := matches[2]
+				path := matches[3]
+
+				group := &RouterGroup{
+					VarName:    varName,
+					Path:       path,
+					ParentVar:  parentVar,
+					LineNumber: lineNum + 1,
+					File:       ctx.File,
+					Children:   make([]*RouterGroup, 0),
+				}
+
+				// Link to parent if exists
+				if parentGroup, exists := ctx.Groups[parentVar]; exists {
+					group.Parent = parentGroup
+					parentGroup.Children = append(parentGroup.Children, group)
+				}
+
+				ctx.Groups[varName] = group
+			}
+		}
+	}
 }
 
-func (s *AnalyzerService) findNodeIDForCall(callName string, nodeMap map[string]*entity.DependencyNode, currentPackage string) string {
-	// Try exact match first
-	for nodeID, node := range nodeMap {
-		if node.Name == callName {
-			return nodeID
+// analyzeRouteCalls finds HTTP method calls with enhanced pattern matching
+func (s *AnalyzerService) analyzeRouteCalls(lines []string, ctx *RouterContext) {
+	patterns := []*regexp.Regexp{
+		// Standard: router.GET("/path", handler)
+		regexp.MustCompile(`(\w+)\.(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|ANY)\s*\(\s*["']([^"']+)["']\s*,\s*([^)]+)\)`),
+		// With middleware: router.GET("/path", middleware, handler)
+		regexp.MustCompile(`(\w+)\.(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|ANY)\s*\(\s*["']([^"']+)["']\s*,\s*([^,)]+(?:,\s*[^)]+)*)\)`),
+		// Gorilla mux style: router.HandleFunc("/path", handler).Methods("GET")
+		regexp.MustCompile(`(\w+)\.HandleFunc\s*\(\s*["']([^"']+)["']\s*,\s*([^)]+)\)\.Methods\s*\(\s*["']([^"']+)["']\s*\)`),
+	}
+
+	for lineNum, line := range lines {
+		for _, pattern := range patterns {
+			if matches := pattern.FindStringSubmatch(line); matches != nil {
+				route := s.parseRouteCall(matches, lineNum, ctx.File)
+				if route != nil {
+					ctx.Routes = append(ctx.Routes, route)
+				}
+			}
+		}
+	}
+}
+
+// parseRouteCall parses individual route call matches
+func (s *AnalyzerService) parseRouteCall(matches []string, lineNum int, file string) *RouteCall {
+	if len(matches) < 4 {
+		return nil
+	}
+
+	route := &RouteCall{
+		VarName:    matches[1],
+		LineNumber: lineNum + 1,
+		File:       file,
+	}
+
+	// Handle different match patterns
+	if strings.Contains(matches[0], "HandleFunc") {
+		// Gorilla mux pattern
+		route.Path = matches[2]
+		route.Handler = matches[3]
+		route.Method = matches[4]
+	} else {
+		// Gin pattern
+		route.Method = matches[2]
+		route.Path = matches[3]
+		route.Handler = matches[4]
+
+		// Parse middlewares if present
+		if strings.Contains(route.Handler, ",") {
+			parts := strings.Split(route.Handler, ",")
+			route.Handler = strings.TrimSpace(parts[len(parts)-1])
+			for i := 0; i < len(parts)-1; i++ {
+				middleware := strings.TrimSpace(parts[i])
+				route.Middlewares = append(route.Middlewares, middleware)
+			}
 		}
 	}
 
-	// Try with current package prefix
-	candidateID := currentPackage + "." + callName + ".function"
-	if _, exists := nodeMap[candidateID]; exists {
-		return candidateID
+	return route
+}
+
+// resolveFullPaths calculates complete paths for all routes
+func (s *AnalyzerService) resolveFullPaths(ctx *RouterContext) {
+	// First, calculate full paths for all groups
+	s.calculateGroupFullPaths(ctx.Groups)
+
+	// Then, resolve full paths for all routes
+	for _, route := range ctx.Routes {
+		route.FullPath = s.buildRouteFullPath(route, ctx)
+	}
+}
+
+// calculateGroupFullPaths builds hierarchical paths for router groups
+func (s *AnalyzerService) calculateGroupFullPaths(groups map[string]*RouterGroup) {
+	// Topological sort to handle dependencies
+	sorted := s.topologicalSortGroups(groups)
+
+	for _, group := range sorted {
+		if group.Parent == nil {
+			// Root group
+			group.FullPath = s.normalizePath(group.Path)
+		} else {
+			// Child group - combine with parent path
+			group.FullPath = s.combinePaths(group.Parent.FullPath, group.Path)
+		}
+	}
+}
+
+// topologicalSortGroups sorts groups by dependency order
+func (s *AnalyzerService) topologicalSortGroups(groups map[string]*RouterGroup) []*RouterGroup {
+	var sorted []*RouterGroup
+	visited := make(map[string]bool)
+
+	var visit func(*RouterGroup)
+	visit = func(group *RouterGroup) {
+		if visited[group.VarName] {
+			return
+		}
+
+		visited[group.VarName] = true
+
+		// Visit parent first
+		if group.Parent != nil && !visited[group.Parent.VarName] {
+			visit(group.Parent)
+		}
+
+		sorted = append(sorted, group)
 	}
 
-	// Try partial matches
-	for nodeID, node := range nodeMap {
-		if strings.Contains(callName, node.Name) || strings.Contains(node.Name, callName) {
-			return nodeID
+	for _, group := range groups {
+		if !visited[group.VarName] {
+			visit(group)
 		}
 	}
 
-	return ""
+	return sorted
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
+// buildRouteFullPath constructs the complete path for a route
+func (s *AnalyzerService) buildRouteFullPath(route *RouteCall, ctx *RouterContext) string {
+	// Find the group this route belongs to
+	if group, exists := ctx.Groups[route.VarName]; exists {
+		return s.combinePaths(group.FullPath, route.Path)
 	}
-	return b
+
+	// Check if it's a direct engine route
+	if basePath, exists := ctx.Variables[route.VarName]; exists {
+		return s.combinePaths(basePath, route.Path)
+	}
+
+	// Fallback to the route path itself
+	return s.normalizePath(route.Path)
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// combinePaths safely combines two path segments
+func (s *AnalyzerService) combinePaths(basePath, routePath string) string {
+	basePath = s.normalizePath(basePath)
+	routePath = s.normalizePath(routePath)
+
+	if basePath == "/" {
+		return routePath
 	}
-	return b
+
+	if routePath == "/" {
+		return basePath
+	}
+
+	// Remove trailing slash from base and leading slash from route
+	basePath = strings.TrimSuffix(basePath, "/")
+	routePath = strings.TrimPrefix(routePath, "/")
+
+	return basePath + "/" + routePath
+}
+
+// normalizePath ensures consistent path formatting
+func (s *AnalyzerService) normalizePath(path string) string {
+	if path == "" {
+		return "/"
+	}
+
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	// Clean up multiple slashes
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
+
+	return path
+}
+
+// extractEndpointsFromContext converts analyzed context to API endpoints
+func (s *AnalyzerService) extractEndpointsFromContext(ctx *RouterContext) []*entity.APIEndpoint {
+	var endpoints []*entity.APIEndpoint
+
+	for _, route := range ctx.Routes {
+		endpoint := &entity.APIEndpoint{
+			ID:     uuid.New().String(),
+			Method: route.Method,
+			Path:   route.FullPath,
+			File:   route.File,
+		}
+
+		endpoints = append(endpoints, endpoint)
+	}
+
+	return endpoints
+}
+
+// analyzeCrossFileRouting handles route setup patterns across multiple files
+func (s *AnalyzerService) analyzeCrossFileRouting(analysis *entity.ProjectAnalysis) []*entity.APIEndpoint {
+	var endpoints []*entity.APIEndpoint
+
+	// Look for main.go or router setup files
+	for filePath, fileInfo := range analysis.Files {
+		if s.isMainOrSetupFile(filePath) {
+			setupEndpoints := s.analyzeRouterSetupFile(fileInfo.Content, filePath, analysis)
+			endpoints = append(endpoints, setupEndpoints...)
+		}
+	}
+
+	return endpoints
+}
+
+// isMainOrSetupFile checks if the file is likely a main or router setup file
+func (s *AnalyzerService) isMainOrSetupFile(filePath string) bool {
+	fileName := strings.ToLower(filePath)
+	return strings.Contains(fileName, "main.go") ||
+		strings.Contains(fileName, "router.go") ||
+		strings.Contains(fileName, "routes.go") ||
+		strings.Contains(fileName, "setup")
+}
+
+// analyzeRouterSetupFile analyzes router setup patterns in main files
+func (s *AnalyzerService) analyzeRouterSetupFile(content string, _ string, _ *entity.ProjectAnalysis) []*entity.APIEndpoint {
+	var endpoints []*entity.APIEndpoint
+
+	// Look for function calls that setup routes
+	setupPattern := regexp.MustCompile(`(\w+)\.Setup\w*Routes?\s*\([^)]*\)`)
+	matches := setupPattern.FindAllStringSubmatch(content, -1)
+
+	for _, match := range matches {
+		if len(match) >= 2 {
+			// This indicates there's a router setup, but we need to find the actual routes
+			// in the router files themselves
+			continue
+		}
+	}
+
+	return endpoints
+}
+
+// isRouterFile checks if file contains routing logic (enhanced version)
+func (s *AnalyzerService) isRouterFile(content string) bool {
+	indicators := []string{
+		"gin.Engine", "gin.RouterGroup", ".Group(",
+		".GET(", ".POST(", ".PUT(", ".DELETE(", ".PATCH(", ".OPTIONS(", ".HEAD(",
+		"router", "Route", "HandleFunc", "mux.Router",
+		"setupRoutes", "SetupRoutes", "routes.go",
+	}
+
+	content = strings.ToLower(content)
+	for _, indicator := range indicators {
+		if strings.Contains(content, strings.ToLower(indicator)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// GetRouteStatistics provides detailed statistics about discovered routes
+func (s *AnalyzerService) GetRouteStatistics(endpoints []*entity.APIEndpoint) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	methodCounts := make(map[string]int)
+	pathCounts := make(map[string]int)
+	fileCounts := make(map[string]int)
+
+	for _, endpoint := range endpoints {
+		methodCounts[endpoint.Method]++
+		fileCounts[endpoint.File]++
+
+		// Count path patterns
+		pathSegments := strings.Split(endpoint.Path, "/")
+		if len(pathSegments) > 1 {
+			pathCounts["/"+pathSegments[1]]++
+		}
+	}
+
+	stats["total_endpoints"] = len(endpoints)
+	stats["methods"] = methodCounts
+	stats["top_level_paths"] = pathCounts
+	stats["files"] = fileCounts
+
+	return stats
 }

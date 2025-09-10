@@ -365,8 +365,9 @@ func (r *MemoryAnalysisRepository) GetAPINodes(projectID, apiID string) ([]*enti
 
 	// Collect all nodes related to this API
 	var apiNodes []*entity.CodeNode
-	for _, nodeID := range endpoint.RelatedNodes {
-		if node, exists := projectNodes[nodeID]; exists {
+	for _, node := range projectNodes {
+		// Check if node is related to the API endpoint based on file
+		if node.File == endpoint.File {
 			apiNodes = append(apiNodes, node)
 		}
 	}
