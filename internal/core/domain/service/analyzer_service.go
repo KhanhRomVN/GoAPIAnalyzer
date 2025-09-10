@@ -2,6 +2,7 @@ package service
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 
 	"goapianalyzer/internal/core/domain/entity"
@@ -56,7 +57,8 @@ type RouterContext struct {
 func (s *AnalyzerService) DiscoverAPIEndpoints(analysis *entity.ProjectAnalysis) error {
 	s.logger.Info("Starting enhanced API endpoint discovery")
 
-	var endpoints []*entity.APIEndpoint
+	// Use a map to track unique endpoints by method and path
+	endpointMap := make(map[string]*entity.APIEndpoint)
 
 	// Analyze each file for routing patterns
 	for filePath, fileInfo := range analysis.Files {
@@ -66,12 +68,46 @@ func (s *AnalyzerService) DiscoverAPIEndpoints(analysis *entity.ProjectAnalysis)
 
 		context := s.analyzeRouterContext(fileInfo.Content, filePath)
 		fileEndpoints := s.extractEndpointsFromContext(context)
-		endpoints = append(endpoints, fileEndpoints...)
+		for _, endpoint := range fileEndpoints {
+			key := endpoint.Method + ":" + endpoint.Path
+			if _, exists := endpointMap[key]; !exists {
+				endpointMap[key] = endpoint
+			} else {
+				// Log duplicate found
+				s.logger.WithFields(map[string]interface{}{
+					"method": endpoint.Method,
+					"path":   endpoint.Path,
+					"file":   endpoint.File,
+				}).Warn("Duplicate endpoint found")
+			}
+		}
 	}
 
 	// Cross-file analysis for router setup patterns
 	crossFileEndpoints := s.analyzeCrossFileRouting(analysis)
-	endpoints = append(endpoints, crossFileEndpoints...)
+	for _, endpoint := range crossFileEndpoints {
+		key := endpoint.Method + ":" + endpoint.Path
+		if _, exists := endpointMap[key]; !exists {
+			endpointMap[key] = endpoint
+		} else {
+			s.logger.WithFields(map[string]interface{}{
+				"method": endpoint.Method,
+				"path":   endpoint.Path,
+				"file":   endpoint.File,
+			}).Warn("Duplicate endpoint found from cross-file analysis")
+		}
+	}
+
+	// Convert map to slice
+	var endpoints []*entity.APIEndpoint
+	for _, endpoint := range endpointMap {
+		endpoints = append(endpoints, endpoint)
+	}
+
+	// Sort endpoints by path
+	sort.Slice(endpoints, func(i, j int) bool {
+		return endpoints[i].Path < endpoints[j].Path
+	})
 
 	analysis.APIEndpoints = endpoints
 
